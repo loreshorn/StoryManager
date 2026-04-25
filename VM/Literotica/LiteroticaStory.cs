@@ -134,6 +134,9 @@ namespace StoryManager.VM.Literotica
         }
         public bool HasOverallRating => Summary.Chapters.Any(x => x.Rating.HasValue);
 
+        /// <summary>Sum of Literotica's per-chapter view counts. Used by the Top Reads tab to rank stories by total readership.</summary>
+        public int TotalViewCount => Summary?.Chapters?.Sum(x => x.ViewCount) ?? 0;
+
         private ReadOnlyCollection<StoryNavigationButton> _ChapterNavButtons;
         public ReadOnlyCollection<StoryNavigationButton> ChapterNavButtons
         {

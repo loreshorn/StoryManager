@@ -28,11 +28,15 @@
         </DockPanel>
         <Border Height="5" />
 
-        <!-- Title / Main rating (rating from other users, not current user) -->
+        <!-- Title / Main rating (rating from other users, not current user) / Total Literotica reads -->
         <DockPanel TextElement.FontSize="12" HorizontalAlignment="Center">
             <TextBlock DockPanel.Dock="Left" VerticalAlignment="Center" FontStyle="Italic" Opacity="0.6" Margin="0,0,4,0" d:Visibility="Visible"
                        Visibility="{Binding HasOverallRating, Mode=OneWay, Converter={StaticResource BooleanToVisibilityConverter},FallbackValue=Collapsed}">
                 <Run Text="(" /><Run Text="{Binding AverageRating, Mode=OneWay, FallbackValue=0.0, StringFormat={}{0:0.00}}" d:Text="4.56" /><Run Text=")" />
+            </TextBlock>
+            <TextBlock DockPanel.Dock="Left" VerticalAlignment="Center" FontStyle="Italic" Opacity="0.6" Margin="0,0,6,0"
+                       ToolTip="Total Literotica view count across all chapters" ToolTipService.InitialShowDelay="50" d:Text="12,345 reads">
+                <Run Text="{Binding TotalViewCount, Mode=OneWay, FallbackValue=0, StringFormat={}{0:N0}}" /><Run Text=" reads" />
             </TextBlock>
             <TextBlock FontSize="12" FontWeight="SemiBold" TextWrapping="Wrap" Text="{Binding Title, Mode=OneWay, FallbackValue='&lt;Title&gt;'}"
                        d:Text="Story Title" />

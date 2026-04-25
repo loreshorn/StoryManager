@@ -130,6 +130,168 @@ css_getclass('.highlight').style.background=""""{{GetRGBAHexString(ForegroundCol
 
         public bool AreAnyStoriesQueued => Stories?.Any(x => x.IsQueued) == true;
 
+        #region Ranked Tabs (Top Rated / Top Reads)
+        //  These two paginated tabs rank by score (UserRating / AverageRating / TotalViewCount) rather than browse-style.
+        //  We deliberately don't use ICollectionView here: the tabs need explicit pagination (100 per page, prev/next),
+        //  and live re-sorting on every filter/visibility change is unnecessary — a manual rebuild on the existing change
+        //  triggers (Stories changed, FilterSettings changed, search committed, page changed, rating-source toggled) is
+        //  cheaper and simpler.
+        public const int RankedPageSize = 100;
+
+        public ObservableCollection<LiteroticaStory> RankedByReadsPage { get; } = new();
+        public ObservableCollection<LiteroticaStory> RankedByRatingPage { get; } = new();
+
+        private int _RankedByReadsPageIndex;
+        public int RankedByReadsPageIndex => _RankedByReadsPageIndex;
+        private int _RankedByReadsTotalPages = 1;
+        public int RankedByReadsTotalPages => _RankedByReadsTotalPages;
+        public bool RankedByReadsCanPrev => _RankedByReadsPageIndex > 0;
+        public bool RankedByReadsCanNext => _RankedByReadsPageIndex + 1 < _RankedByReadsTotalPages;
+        public string RankedByReadsPageLabel => $"Page {_RankedByReadsPageIndex + 1} of {Math.Max(1, _RankedByReadsTotalPages)}";
+
+        public DelegateCommand<object> RankedByReadsPrev => new(_ =>
+        {
+            if (!RankedByReadsCanPrev) return;
+            _RankedByReadsPageIndex--;
+            RebuildRankedByReadsPage();
+        });
+        public DelegateCommand<object> RankedByReadsNext => new(_ =>
+        {
+            if (!RankedByReadsCanNext) return;
+            _RankedByReadsPageIndex++;
+            RebuildRankedByReadsPage();
+        });
+
+        private int _RankedByRatingPageIndex;
+        public int RankedByRatingPageIndex => _RankedByRatingPageIndex;
+        private int _RankedByRatingTotalPages = 1;
+        public int RankedByRatingTotalPages => _RankedByRatingTotalPages;
+        public bool RankedByRatingCanPrev => _RankedByRatingPageIndex > 0;
+        public bool RankedByRatingCanNext => _RankedByRatingPageIndex + 1 < _RankedByRatingTotalPages;
+        public string RankedByRatingPageLabel => $"Page {_RankedByRatingPageIndex + 1} of {Math.Max(1, _RankedByRatingTotalPages)}";
+
+        public DelegateCommand<object> RankedByRatingPrev => new(_ =>
+        {
+            if (!RankedByRatingCanPrev) return;
+            _RankedByRatingPageIndex--;
+            RebuildRankedByRatingPage();
+        });
+        public DelegateCommand<object> RankedByRatingNext => new(_ =>
+        {
+            if (!RankedByRatingCanNext) return;
+            _RankedByRatingPageIndex++;
+            RebuildRankedByRatingPage();
+        });
+
+        //  Min-reads filter for the Top Rated tab. Stories with TotalViewCount below this are excluded so the rating
+        //  ranking isn't dominated by stories with one or two reads that happened to land on five stars.
+        public IReadOnlyList<int> MinReadsForRatingOptions { get; } = new[]
+        {
+            0, 1_000, 10_000, 50_000, 100_000, 200_000, 500_000, 1_000_000,
+            2_500_000, 5_000_000, 7_500_000, 10_000_000, 12_500_000, 15_000_000
+        };
+
+        private int _MinReadsForRating;
+        public int MinReadsForRating
+        {
+            get => _MinReadsForRating;
+            set
+            {
+                if (_MinReadsForRating != value)
+                {
+                    _MinReadsForRating = value;
+                    NPC(nameof(MinReadsForRating));
+                    //  Threshold change can drop or admit stories from the page set, so reset to page 1.
+                    _RankedByRatingPageIndex = 0;
+                    RebuildRankedByRatingPage();
+                }
+            }
+        }
+
+        //  Default ranking source is Literotica's site average (HasOverallRating / AverageRating). Most libraries have
+        //  far more site-rated stories than user-rated ones, so this gives a populated tab on first launch.
+        private bool _RankRatingByUserRating = false;
+        public bool RankRatingByUserRating
+        {
+            get => _RankRatingByUserRating;
+            set
+            {
+                if (_RankRatingByUserRating != value)
+                {
+                    _RankRatingByUserRating = value;
+                    NPC(nameof(RankRatingByUserRating));
+                    NPC(nameof(RankRatingBySiteAverage));
+                    //  Switching ranking source resets to page 1: page indices are tied to the underlying ordering,
+                    //  and what was page 5 of UserRating is meaningless under SiteAverage.
+                    _RankedByRatingPageIndex = 0;
+                    RebuildRankedByRatingPage();
+                }
+            }
+        }
+        public bool RankRatingBySiteAverage
+        {
+            get => !RankRatingByUserRating;
+            set { if (value) RankRatingByUserRating = false; }
+        }
+
+        private void RebuildRankedByReadsPage()
+        {
+            if (Stories == null)
+                return;
+            List<LiteroticaStory> Ranked = Stories
+                .Where(s => s.IsVisible)
+                .OrderByDescending(s => s.TotalViewCount)
+                .ThenBy(s => s.Title)
+                .ToList();
+
+            _RankedByReadsTotalPages = Math.Max(1, (Ranked.Count + RankedPageSize - 1) / RankedPageSize);
+            _RankedByReadsPageIndex = Math.Clamp(_RankedByReadsPageIndex, 0, _RankedByReadsTotalPages - 1);
+
+            RankedByReadsPage.Clear();
+            foreach (LiteroticaStory s in Ranked.Skip(_RankedByReadsPageIndex * RankedPageSize).Take(RankedPageSize))
+                RankedByReadsPage.Add(s);
+
+            NPC(nameof(RankedByReadsPageIndex));
+            NPC(nameof(RankedByReadsTotalPages));
+            NPC(nameof(RankedByReadsCanPrev));
+            NPC(nameof(RankedByReadsCanNext));
+            NPC(nameof(RankedByReadsPageLabel));
+        }
+
+        private void RebuildRankedByRatingPage()
+        {
+            if (Stories == null)
+                return;
+            //  Filter to "has the chosen rating", apply the min-reads threshold, sort descending, tie-break by title.
+            IEnumerable<LiteroticaStory> Visible = Stories.Where(s => s.IsVisible);
+            if (_MinReadsForRating > 0)
+                Visible = Visible.Where(s => s.TotalViewCount >= _MinReadsForRating);
+            IOrderedEnumerable<LiteroticaStory> Sorted = RankRatingByUserRating
+                ? Visible.Where(s => s.UserRating.HasValue).OrderByDescending(s => s.UserRating.Value)
+                : Visible.Where(s => s.HasOverallRating).OrderByDescending(s => s.AverageRating);
+            List<LiteroticaStory> Ranked = Sorted.ThenBy(s => s.Title).ToList();
+
+            _RankedByRatingTotalPages = Math.Max(1, (Ranked.Count + RankedPageSize - 1) / RankedPageSize);
+            _RankedByRatingPageIndex = Math.Clamp(_RankedByRatingPageIndex, 0, _RankedByRatingTotalPages - 1);
+
+            RankedByRatingPage.Clear();
+            foreach (LiteroticaStory s in Ranked.Skip(_RankedByRatingPageIndex * RankedPageSize).Take(RankedPageSize))
+                RankedByRatingPage.Add(s);
+
+            NPC(nameof(RankedByRatingPageIndex));
+            NPC(nameof(RankedByRatingTotalPages));
+            NPC(nameof(RankedByRatingCanPrev));
+            NPC(nameof(RankedByRatingCanNext));
+            NPC(nameof(RankedByRatingPageLabel));
+        }
+
+        private void RebuildRankedTabs()
+        {
+            RebuildRankedByReadsPage();
+            RebuildRankedByRatingPage();
+        }
+        #endregion Ranked Tabs
+
         private void UpdateStoryVisibilities()
         {
             if (Stories == null)
@@ -455,6 +617,7 @@ window.scrollTo({{ top: scrollDiv, behavior: 'smooth'}});";
                     _CommittedSearchQuery = value;
                     NPC(nameof(CommittedSearchQuery));
                     UpdateStoryVisibilities();
+                    RebuildRankedTabs();
                 }
             }
         }
@@ -469,7 +632,10 @@ window.scrollTo({{ top: scrollDiv, behavior: 'smooth'}});";
         private void HandleSearchSettingChanged()
         {
             if (!string.IsNullOrEmpty(CommittedSearchQuery))
+            {
                 UpdateStoryVisibilities();
+                RebuildRankedTabs();
+            }
         }
 
         private bool _SearchStoryTitles;
@@ -557,7 +723,12 @@ window.scrollTo({{ top: scrollDiv, behavior: 'smooth'}});";
             Downloader = new(this);
             Searcher = new(this);
 
-            Settings.DisplaySettings.FilterSettings.FiltersChanged += (sender, e) => UpdateStoryVisibilities();
+            Settings.DisplaySettings.FilterSettings.FiltersChanged += (sender, e) =>
+            {
+                UpdateStoryVisibilities();
+                //  Visibility changes can drop or admit stories from the ranked tabs' source set, so re-page.
+                RebuildRankedTabs();
+            };
 
             Window.Left = Settings.PreviousSessionSettings.WindowLeftPosition ?? Window.Left;
             Window.Top = Settings.PreviousSessionSettings.WindowTopPosition ?? Window.Top;
@@ -592,6 +763,8 @@ window.scrollTo({{ top: scrollDiv, behavior: 'smooth'}});";
                 {
                     NPC(nameof(AreAnyStoriesQueued));
                     RecomputeTotalMaxWordCount();
+                    //  Bulk-load fires a single Reset (BulkObservableCollection.AddRange) so this runs once per load.
+                    RebuildRankedTabs();
                 }
             };
 
@@ -1086,6 +1259,9 @@ window.scrollTo({{ top: scrollDiv, behavior: 'smooth'}});";
 
             Progress?.Report((TotalStoryCount, TotalStoryCount, "Applying filters..."));
             UpdateStoryVisibilities();
+            //  UpdateStoryVisibilities can flip IsVisible on individual stories without firing a Stories collection
+            //  notification. Rebuild the ranked tabs so they reflect the post-filter visibility set.
+            RebuildRankedTabs();
 
             //  Mark loading complete only after Stories is fully populated. SaveAsync uses this to decide whether
             //  it can safely overwrite per-story / per-author settings, so it must not flip until the bulk add

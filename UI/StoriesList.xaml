@@ -378,7 +378,7 @@
                              ItemsSource="{Binding QueuedStories}" SelectedItem="{Binding BindableSelectedStory, Mode=TwoWay}" d:ItemsSource="{d:SampleData ItemCount=8}">
 
                     </ListBox>
-                    <Border HorizontalAlignment="Center" VerticalAlignment="Center" Margin="8" Padding="6" 
+                    <Border HorizontalAlignment="Center" VerticalAlignment="Center" Margin="8" Padding="6"
                             BorderBrush="Black" BorderThickness="1" Background="White" d:Visibility="Visible"
                             Visibility="{Binding AreAnyStoriesQueued, Mode=OneWay, Converter={StaticResource InverseBooleanToVisibilityConverter}, FallbackValue=Collapsed}">
                         <StackPanel Orientation="Vertical">
@@ -391,6 +391,57 @@
                         </StackPanel>
                     </Border>
                 </Grid>
+            </TabItem>
+
+            <TabItem Header="Top Rated">
+                <DockPanel>
+                    <DockPanel DockPanel.Dock="Top" Margin="3,5,3,3" LastChildFill="True">
+                        <Button DockPanel.Dock="Left"  Content="◀" Padding="6,2" Margin="0,0,4,0"
+                                Command="{Binding RankedByRatingPrev}" IsEnabled="{Binding RankedByRatingCanPrev}" />
+                        <Button DockPanel.Dock="Right" Content="▶" Padding="6,2" Margin="4,0,0,0"
+                                Command="{Binding RankedByRatingNext}" IsEnabled="{Binding RankedByRatingCanNext}" />
+                        <TextBlock HorizontalAlignment="Center" VerticalAlignment="Center"
+                                   Text="{Binding RankedByRatingPageLabel, FallbackValue='Page 1 of 1'}" />
+                    </DockPanel>
+                    <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,0,0,4">
+                        <RadioButton Content="My rating"    GroupName="RatingSource" Margin="0,0,8,0"
+                                     IsChecked="{Binding RankRatingByUserRating, Mode=TwoWay}" />
+                        <RadioButton Content="Site average" GroupName="RatingSource"
+                                     IsChecked="{Binding RankRatingBySiteAverage, Mode=TwoWay}" />
+                    </StackPanel>
+                    <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" HorizontalAlignment="Center" Margin="3,0,3,4">
+                        <TextBlock VerticalAlignment="Center" Margin="0,0,6,0"
+                                   Text="Number Read Filter:" ToolTip="Hide stories with fewer Literotica views than this threshold" />
+                        <ComboBox MinWidth="100" VerticalAlignment="Center"
+                                  ItemsSource="{Binding MinReadsForRatingOptions}"
+                                  SelectedItem="{Binding MinReadsForRating, Mode=TwoWay}">
+                            <ComboBox.ItemTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding Mode=OneWay, StringFormat={}{0:N0}}" />
+                                </DataTemplate>
+                            </ComboBox.ItemTemplate>
+                        </ComboBox>
+                    </StackPanel>
+                    <ListBox Style="{StaticResource StoryListStyle}" IsSynchronizedWithCurrentItem="False"
+                             ItemsSource="{Binding RankedByRatingPage}"
+                             SelectedItem="{Binding BindableSelectedStory, Mode=TwoWay}" d:ItemsSource="{d:SampleData ItemCount=8}" />
+                </DockPanel>
+            </TabItem>
+
+            <TabItem Header="Top Reads">
+                <DockPanel>
+                    <DockPanel DockPanel.Dock="Top" Margin="3,5,3,3" LastChildFill="True">
+                        <Button DockPanel.Dock="Left"  Content="◀" Padding="6,2" Margin="0,0,4,0"
+                                Command="{Binding RankedByReadsPrev}" IsEnabled="{Binding RankedByReadsCanPrev}" />
+                        <Button DockPanel.Dock="Right" Content="▶" Padding="6,2" Margin="4,0,0,0"
+                                Command="{Binding RankedByReadsNext}" IsEnabled="{Binding RankedByReadsCanNext}" />
+                        <TextBlock HorizontalAlignment="Center" VerticalAlignment="Center"
+                                   Text="{Binding RankedByReadsPageLabel, FallbackValue='Page 1 of 1'}" />
+                    </DockPanel>
+                    <ListBox Style="{StaticResource StoryListStyle}" IsSynchronizedWithCurrentItem="False"
+                             ItemsSource="{Binding RankedByReadsPage}"
+                             SelectedItem="{Binding BindableSelectedStory, Mode=TwoWay}" d:ItemsSource="{d:SampleData ItemCount=8}" />
+                </DockPanel>
             </TabItem>
         </TabControl>
     </DockPanel>
