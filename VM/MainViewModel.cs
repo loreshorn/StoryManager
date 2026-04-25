@@ -122,7 +122,7 @@ css_getclass('.highlight').style.background=""""{{GetRGBAHexString(ForegroundCol
                 await WebView.ExecuteScriptAsync($"highlight(\"{Settings.CommaDelimitedKeywords}\")");
         }
 
-        public ObservableCollection<LiteroticaStory> Stories { get; }
+        public BulkObservableCollection<LiteroticaStory> Stories { get; }
         public ICollectionView SortedStories { get; }
         public ICollectionView FavoritedStories { get; }
         public ObservableCollection<LiteroticaStory> RecentStories { get; }
@@ -130,7 +130,45 @@ css_getclass('.highlight').style.background=""""{{GetRGBAHexString(ForegroundCol
 
         public bool AreAnyStoriesQueued => Stories?.Any(x => x.IsQueued) == true;
 
-        private void UpdateStoryVisibilities() => Stories?.ToList().ForEach(x => x.UpdateVisibility());
+        private void UpdateStoryVisibilities()
+        {
+            if (Stories == null)
+                return;
+            foreach (LiteroticaStory Story in Stories)
+                Story.UpdateVisibility();
+        }
+
+        private void Story_IsQueuedChangedHandler(object sender, bool isQueued) => NPC(nameof(AreAnyStoriesQueued));
+
+        /// <summary>Registers per-story bookkeeping (chapter-title index, persisted user metadata, and the IsQueued event subscription)
+        /// for a story being added to <see cref="Stories"/>. Used directly by bulk-load paths and indirectly by the CollectionChanged
+        /// handler for incremental Add/Replace.</summary>
+        private void RegisterStory(LiteroticaStory Story)
+        {
+            foreach (SerializableChapter Chapter in Story.Summary.Chapters)
+                StoriesByChapterTitle[Chapter.Url] = Story;
+            Settings.GetPreviousSessionStorySettings(Story, new()).ApplyTo(Story);
+            Story.OnIsQueuedChanged += Story_IsQueuedChangedHandler;
+        }
+
+        /// <summary>Inverse of <see cref="RegisterStory"/>.</summary>
+        private void UnregisterStory(LiteroticaStory Story)
+        {
+            foreach (SerializableChapter Chapter in Story.Summary.Chapters)
+                StoriesByChapterTitle.Remove(Chapter.Url);
+            Story.OnIsQueuedChanged -= Story_IsQueuedChangedHandler;
+        }
+
+        private void RecomputeTotalMaxWordCount()
+        {
+            int Max = 100;
+            foreach (LiteroticaStory Story in Stories)
+            {
+                if (Story.WordCount > Max)
+                    Max = Story.WordCount;
+            }
+            Settings.DisplaySettings.FilterSettings.TotalMaxWordCount = Max;
+        }
 
         /// <summary>
         /// Key = the http-encoded title of a story chapter, such as "accidents-happen-1" (<see href="https://www.literotica.com/s/accidents-happen-1"/>)<br/>
@@ -351,6 +389,11 @@ window.scrollTo({{ top: scrollDiv, behavior: 'smooth'}});";
         public Downloader Downloader { get; }
         public StorySearcher Searcher { get; }
 
+        /// <summary><see langword="true"/> once <see cref="LoadStoriesAsync"/> has finished populating <see cref="Stories"/>.<br/>
+        /// While this is <see langword="false"/>, persisting the in-memory state would overwrite settings.json with empty
+        /// per-story / per-author data, so <see cref="VM.Settings.SaveAsync(bool)"/> preserves the previous session's values instead.</summary>
+        public bool IsStoriesLoaded { get; private set; }
+
         #region Searching
         public bool IsSearchMatch(LiteroticaStory Story)
         {
@@ -377,8 +420,28 @@ window.scrollTo({{ top: scrollDiv, behavior: 'smooth'}});";
                 {
                     _SearchQuery = value;
                     NPC(nameof(SearchQuery));
+                    ScheduleSearchCommit();
                 }
             }
+        }
+
+        //  Debounce per-keystroke search edits so we don't walk every story (and re-evaluate every ICollectionView)
+        //  on each character typed. The Enter key / search button still commit immediately via CommitSearch.
+        private static readonly TimeSpan SearchDebounceDelay = TimeSpan.FromMilliseconds(250);
+        private System.Windows.Threading.DispatcherTimer SearchDebounceTimer;
+        private void ScheduleSearchCommit()
+        {
+            if (SearchDebounceTimer == null)
+            {
+                SearchDebounceTimer = new System.Windows.Threading.DispatcherTimer { Interval = SearchDebounceDelay };
+                SearchDebounceTimer.Tick += (sender, e) =>
+                {
+                    SearchDebounceTimer.Stop();
+                    CommittedSearchQuery = SearchQuery;
+                };
+            }
+            SearchDebounceTimer.Stop();
+            SearchDebounceTimer.Start();
         }
 
         private string _CommittedSearchQuery;
@@ -396,7 +459,11 @@ window.scrollTo({{ top: scrollDiv, behavior: 'smooth'}});";
             }
         }
 
-        public DelegateCommand<object> CommitSearch => new(_ => CommittedSearchQuery = SearchQuery);
+        public DelegateCommand<object> CommitSearch => new(_ =>
+        {
+            SearchDebounceTimer?.Stop();
+            CommittedSearchQuery = SearchQuery;
+        });
 
         #region Settings
         private void HandleSearchSettingChanged()
@@ -503,50 +570,28 @@ window.scrollTo({{ top: scrollDiv, behavior: 'smooth'}});";
 
             _AuthorGroups = new();
 
-            bool IsReloadingStories = false;
-
             Stories = new();
             Stories.CollectionChanged += (sender, e) =>
             {
-                void Story_IsQueuedChangedHandler(object sender, bool isQueued)
-                {
-                    NPC(nameof(AreAnyStoriesQueued));
-                }
-
-                //  Update cached data when stories are added or removed to the collection
+                //  Update cached data when stories are added or removed to the collection.
+                //  (Bulk loads register stories explicitly via RegisterStory before AddRange and clean up
+                //  via UnregisterStory before Clear, so they arrive here as a single Reset notification.)
                 if (e.Action is NotifyCollectionChangedAction.Add or NotifyCollectionChangedAction.Replace && e.NewItems != null)
                 {
                     foreach (LiteroticaStory Story in e.NewItems)
-                    {
-                        foreach (SerializableChapter Chapter in Story.Summary.Chapters)
-                            StoriesByChapterTitle[Chapter.Url] = Story;
-                        Settings.GetPreviousSessionStorySettings(Story, new()).ApplyTo(Story);
-
-                        Story.OnIsQueuedChanged += Story_IsQueuedChangedHandler;
-                    }
+                        RegisterStory(Story);
                 }
 
                 if (e.Action is NotifyCollectionChangedAction.Remove or NotifyCollectionChangedAction.Replace && e.OldItems != null)
                 {
                     foreach (LiteroticaStory Story in e.OldItems)
-                    {
-                        foreach (SerializableChapter Chapter in Story.Summary.Chapters)
-                            StoriesByChapterTitle.Remove(Chapter.Url);
-
-                        Story.OnIsQueuedChanged -= Story_IsQueuedChangedHandler;
-                    }
+                        UnregisterStory(Story);
                 }
 
-                if (e.Action is NotifyCollectionChangedAction.Add or NotifyCollectionChangedAction.Remove or NotifyCollectionChangedAction.Replace)
+                if (e.Action is NotifyCollectionChangedAction.Add or NotifyCollectionChangedAction.Remove or NotifyCollectionChangedAction.Replace or NotifyCollectionChangedAction.Reset)
                 {
                     NPC(nameof(AreAnyStoriesQueued));
-                    Settings.DisplaySettings.FilterSettings.TotalMaxWordCount = !Stories.Any() ? 100 : Stories.Max(x => x.WordCount);
-                }
-
-                if (e.Action is NotifyCollectionChangedAction.Reset)
-                {
-                    if (!IsReloadingStories)
-                        throw new NotImplementedException();
+                    RecomputeTotalMaxWordCount();
                 }
             };
 
@@ -576,18 +621,16 @@ window.scrollTo({{ top: scrollDiv, behavior: 'smooth'}});";
             QueuedStories = CollectionViewHelpers.GetSortedFilteredCollectionView(Stories, x => x.IsQueued, nameof(LiteroticaStory.IsQueued), 
                 new SortDescription(nameof(LiteroticaStory.QueuedAt), ListSortDirection.Descending), TitleSortDescription);
 
-            Task LoadStoriesTask = LoadStoriesAsync(true);
+            //  Show a progress dialog during initial story load. Auto-close-on-complete is false so the dialog shows
+            //  a "Loaded N stories" notification with an OK button when the load finishes, per the user-facing spec.
+            ProgressDialog LoadDialog = new("Loading stories...", AutoCloseOnComplete: false) { Owner = Window };
+            IProgress<(int current, int total, string status)> LoadProgress = new Progress<(int, int, string)>(p => LoadDialog.Report(p.Item1, p.Item2, p.Item3));
+            LoadDialog.Show();
+            Task LoadStoriesTask = LoadStoriesAsync(true, LoadProgress, LoadDialog);
 
-            Settings.StoriesDirectoryChanged += (sender, e) =>
-            {
-                try
-                {
-                    IsReloadingStories = true;
-                    Stories.Clear();
-                }
-                finally { IsReloadingStories = false; }
-                _ = LoadStoriesAsync(false);
-            };
+            //  Stories-folder switching is handled through ReloadStoriesFolderAsync below; the BrowseStoriesFolder
+            //  command in Settings calls into it directly so the full save-old / reset / load-new sequence runs
+            //  atomically. There is no longer a free-floating StoriesDirectoryChanged event.
 
             void UpdateSortingAndGrouping(ICollectionView SourceCollection, bool IsGrouping)
             {
@@ -643,8 +686,19 @@ window.scrollTo({{ top: scrollDiv, behavior: 'smooth'}});";
                 e.Cancel = true;
                 Window.IsEnabled = false;
                 TryWarnIfUnsavedStory(SelectedStory);
-                await Settings.SaveAsync(true);
-                // In rare cases, Settings.SaveAsync executes synchronously, which causes Window.Close() to fail because the initial Window.Closing event is still invoking
+
+                //  Show a progress dialog while saving and auto-close (then exit) when the save completes.
+                ProgressDialog SaveDialog = new("Saving stories...", AutoCloseOnComplete: true) { Owner = Window };
+                IProgress<(int current, int total, string status)> SaveProgress = new Progress<(int, int, string)>(p => SaveDialog.Report(p.Item1, p.Item2, p.Item3));
+                SaveDialog.Show();
+
+                try
+                {
+                    await Settings.SaveAsync(true, SaveProgress);
+                }
+                finally { SaveDialog.MarkComplete("Done."); }
+
+                //  In rare cases, Settings.SaveAsync executes synchronously, which causes Window.Close() to fail because the initial Window.Closing event is still invoking
                 await Task.Delay(TimeSpan.FromMilliseconds(5));
                 Window.Close();
                 Window.IsEnabled = true;
@@ -776,14 +830,86 @@ window.scrollTo({{ top: scrollDiv, behavior: 'smooth'}});";
             catch (Exception ex) { MessageBox.Show($"Error while deleting story '{Story.Title}':\n\n{ex.ToString()}"); }
         }
 
-        private async Task LoadStoriesAsync(bool IsInitializing)
+        /// <summary>Switches the active stories folder. Saves the current session's state into the old folder, tears down every
+        /// piece of in-memory state that could leak old-folder data into the new folder (story instances, author groups, history,
+        /// recent stories, unsaved-warning exclusions, the selected story), reloads <c>settings.json</c> from inside the new
+        /// folder via <see cref="VM.Settings.SwitchStoriesDirectory"/>, then runs <see cref="LoadStoriesAsync"/> with a progress
+        /// dialog. Equivalent to a clean restart with the new bootstrap pointer, but without exiting the process.</summary>
+        public async Task ReloadStoriesFolderAsync(string NewStoriesFolder)
+        {
+            if (string.IsNullOrEmpty(NewStoriesFolder) || NewStoriesFolder == Settings.StoriesDirectory)
+                return;
+
+            //  Step 1: persist the current session's state into the OLD folder so the user's recent ratings/favorites/notes/
+            //  history/etc. are not lost when we switch. SaveAsync targets the current StoriesDirectory, which still points
+            //  at the old folder at this moment. This is also why we DO NOT switch the directory before saving.
+            try
+            {
+                if (IsStoriesLoaded)
+                    await Settings.SaveAsync(true);
+            }
+            catch (Exception ex) { Debug.WriteLine($"Failed to save settings to old stories folder before switching:\n{ex}"); }
+
+            //  Step 2: drop every reference that could carry old-folder state into the new session. After this point the
+            //  MVM's story-related collections are equivalent to a freshly-constructed instance, except for window geometry
+            //  / WebView2 / progress dialog plumbing which legitimately persists across the switch.
+            IsStoriesLoaded = false;
+
+            //  Clear the selected story so the right-pane viewer doesn't keep displaying an orphaned old-folder story.
+            //  Pass UpdateNavigationHistory=false (we're about to wipe history below anyway) and WarnIfUnsaved=false
+            //  (the unsaved warning was already given a chance via the explicit save above).
+            if (_SelectedStory != null)
+                await SetSelectedStoryAsync(null, UpdateNavigationHistory: false, WarnIfUnsaved: false);
+
+            foreach (LiteroticaStory Story in Stories.ToList())
+                UnregisterStory(Story);
+            Stories.Clear();
+            StoriesByChapterTitle.Clear();   // defense-in-depth; UnregisterStory already removes per-chapter entries
+            _AuthorGroups.Clear();
+            BackHistory.Clear();
+            ForwardHistory.Clear();
+            RecentStories.Clear();
+            UnsavedWarningExclusions.Clear();
+
+            //  Step 3: switch the active stories folder. SwitchStoriesDirectory writes the bootstrap pointer and reloads
+            //  settings.json (theme/font/colors/keywords/sort/group/history-size/warn/per-story+author lookup dicts) from
+            //  inside the new folder. After this returns, AuthorSettingsByName / StorySettingsByAuthorAndTitle reflect the
+            //  new library, so RegisterStory will apply the correct metadata when stories are loaded below.
+            Settings.SwitchStoriesDirectory(NewStoriesFolder);
+
+            //  Step 4: load stories from the new folder, with a progress dialog (matches startup UX).
+            ProgressDialog ReloadDialog = new("Loading stories...", AutoCloseOnComplete: false) { Owner = Window };
+            IProgress<(int current, int total, string status)> ReloadProgress = new Progress<(int, int, string)>(p => ReloadDialog.Report(p.Item1, p.Item2, p.Item3));
+            ReloadDialog.Show();
+            await LoadStoriesAsync(false, ReloadProgress, ReloadDialog);
+        }
+
+        private async Task LoadStoriesAsync(bool IsInitializing, IProgress<(int current, int total, string status)> Progress = null, ProgressDialog Dialog = null)
         {
             Stopwatch sw = Stopwatch.StartNew();
 
-            Dictionary<string, SerializableStory> CachedStories = Settings.PreviousSessionSettings.StoryMetadata.Where(x => x.IsUpToDate)
-                .DistinctBy(x => GetStoryUniqueKey(x.Author.username, x.Title)).ToDictionary(x => GetStoryUniqueKey(GeneralUtils.ToSafeFilename(x.Author.username), GeneralUtils.ToSafeFilename(x.Title)));
-
             string BaseFolder = Settings.StoriesDirectory;
+            //  We track this separately from Directory.Exists at the AddRange site below because we need to know
+            //  whether the configured folder was *reachable*, not just whether it produced stories. A reachable but
+            //  empty folder is a valid "no stories" state and should set IsStoriesLoaded so saves reflect it; an
+            //  unreachable folder (offline drive, missing path from a copied-in settings.json, etc.) must NOT set
+            //  IsStoriesLoaded so SaveAsync preserves the prior session's per-story metadata instead of wiping it.
+            bool BaseFolderExists = Directory.Exists(BaseFolder);
+
+            //  Pre-count the total number of story folders so the progress bar is determinate. Cheap dir-walk only;
+            //  no JSON read happens here.
+            int TotalStoryCount = 0;
+            if (BaseFolderExists)
+            {
+                foreach (string AuthorFolder in Directory.GetDirectories(BaseFolder))
+                {
+                    try { TotalStoryCount += Directory.GetDirectories(AuthorFolder).Length; }
+                    catch { /* unreadable subfolder — ignore for the purposes of the pre-count */ }
+                }
+            }
+            Progress?.Report((0, TotalStoryCount, TotalStoryCount == 0 ? "No stories found" : $"Loading 0 of {TotalStoryCount} stories..."));
+
+            int CompletedCount = 0;
 
 #if true //multi-threaded loading for each author folder
             List<Task<List<(SerializableStory data, string folder)>>> StoryTasks = new();
@@ -799,58 +925,87 @@ window.scrollTo({{ top: scrollDiv, behavior: 'smooth'}});";
                     {
                         try
                         {
-                            string StoryTitle = new DirectoryInfo(StoryFolder).Name;
-                            string Key = GetStoryUniqueKey(GeneralUtils.ToSafeFilename(AuthorName), GeneralUtils.ToSafeFilename(StoryTitle));
-                            if (!CachedStories.TryGetValue(Key, out SerializableStory Story))
+                            string SummaryFile = Path.Combine(StoryFolder, LiteroticaStory.SummaryFilename);
+
+                            //  First try loading the data from the smaller story-metadata.json file. If that file
+                            //  exists but is empty / corrupt / from an older schema, treat it as a miss and fall
+                            //  through to the full story.json. Newtonsoft returns null (rather than throwing) for
+                            //  inputs like an empty file or the literal "null", which used to NPE at .IsUpToDate.
+                            SerializableStory Story = null;
+                            if (File.Exists(SummaryFile))
                             {
-                                string SummaryFile = Path.Combine(StoryFolder, LiteroticaStory.SummaryFilename);
+                                try { Story = GeneralUtils.DeserializeJson<SerializableStory>(File.ReadAllText(SummaryFile)); }
+                                catch (Exception summaryEx) { Debug.WriteLine($"Failed reading summary '{SummaryFile}', falling back to story.json:\n{summaryEx}"); }
+                            }
+                            bool Loaded = Story != null && Story.IsUpToDate;
 
-                                //  First try loading the data from the smaller story-metadata.json file
-                                bool Loaded = false;
-                                if (File.Exists(SummaryFile))
-                                {
-                                    string Json = File.ReadAllText(SummaryFile);
-                                    Story = GeneralUtils.DeserializeJson<SerializableStory>(Json);
-
-                                    //  If summary data is from an older version, it must be fully loaded and have its summary data re-written
-                                    if (Story.IsUpToDate)
-                                        Loaded = true;
-                                }
-
-                                //  If still not successfully loaded, load the entire story contents from story.json
-                                if (!Loaded)
-                                {
-                                    string Json = File.ReadAllText(StoryFile);
-                                    Story = GeneralUtils.DeserializeJson<SerializableStory>(Json);
-                                    string Summary = GeneralUtils.SerializeJson(Story.AsSummary(), true);
-                                    File.WriteAllText(SummaryFile, Summary);
-                                }
+                            //  If still not successfully loaded, load the entire story contents from story.json
+                            if (!Loaded)
+                            {
+                                string Json = File.ReadAllText(StoryFile);
+                                Story = GeneralUtils.DeserializeJson<SerializableStory>(Json);
+                                if (Story == null)
+                                    throw new InvalidDataException($"'{StoryFile}' did not deserialize into a valid story (file is empty, corrupt, or unrecognized JSON).");
+                                string Summary = GeneralUtils.SerializeJson(Story.AsSummary(), true);
+                                File.WriteAllText(SummaryFile, Summary);
                             }
 
                             Result.Add((Story, StoryFolder));
                         }
                         catch (Exception ex) { MessageBox.Show($"Error loading story from file at '{StoryFile}':\n\n{ex}"); }
+
+                        if (Progress != null)
+                        {
+                            //  Increment under Interlocked because LoadStories runs on a Task per author folder.
+                            int Done = System.Threading.Interlocked.Increment(ref CompletedCount);
+                            Progress.Report((Done, TotalStoryCount, $"Loading {Done} of {TotalStoryCount} stories..."));
+                        }
                     }
                 }
 
                 return Result;
             }
 
-            if (Directory.Exists(BaseFolder))
+            if (BaseFolderExists)
             {
                 foreach (string AuthorFolder in Directory.GetDirectories(BaseFolder))
                 {
-                    Task<List<(SerializableStory, string)>> AuthorStoriesTask = Task.Run(() => LoadStories(new DirectoryInfo(AuthorFolder).Name, AuthorFolder));                    
+                    Task<List<(SerializableStory, string)>> AuthorStoriesTask = Task.Run(() => LoadStories(new DirectoryInfo(AuthorFolder).Name, AuthorFolder));
                     StoryTasks.Add(AuthorStoriesTask);
                 }
             }
 
             await Task.WhenAll(StoryTasks);
+
+            //  Construct all LiteroticaStory instances first, register each one, then add them all in a single
+            //  AddRange. AddRange raises a single CollectionChanged(Reset) instead of one per item, which avoids
+            //  O(N^2) rework in the four ICollectionViews bound to Stories.
+            //  These post-read phases run on the UI thread and used to be silent — to the user the progress bar would
+            //  hit 100% and then the dialog would freeze for several seconds before stories appeared. We now report
+            //  status text for each phase so the user can see what's happening; the bar stays at the loaded count and
+            //  Dispatcher.Yield calls let WPF process queued progress updates and dialog repaints between phases.
+            int Constructed = 0;
+            List<LiteroticaStory> Loaded = new(TotalStoryCount);
+            Progress?.Report((TotalStoryCount, TotalStoryCount, $"Indexing {TotalStoryCount} stor{(TotalStoryCount == 1 ? "y" : "ies")}..."));
+            await System.Windows.Threading.Dispatcher.Yield(System.Windows.Threading.DispatcherPriority.Background);
             foreach (var (data, folder) in StoryTasks.SelectMany(x => x.Result))
             {
-                LiteroticaStory Story = new(this, data, folder);
-                Stories.Add(Story);
+                Loaded.Add(new LiteroticaStory(this, data, folder));
+                Constructed++;
+                if (Progress != null && (Constructed % 200 == 0))
+                    Progress.Report((TotalStoryCount, TotalStoryCount, $"Indexing {Constructed} of {TotalStoryCount} stories..."));
             }
+
+            Progress?.Report((TotalStoryCount, TotalStoryCount, $"Applying saved metadata to {Loaded.Count} stor{(Loaded.Count == 1 ? "y" : "ies")}..."));
+            await System.Windows.Threading.Dispatcher.Yield(System.Windows.Threading.DispatcherPriority.Background);
+            foreach (LiteroticaStory Story in Loaded)
+                RegisterStory(Story);
+
+            //  AddRange triggers the four ICollectionViews to re-filter, re-sort, and (for the grouped views)
+            //  re-group. For thousands of items this is the longest phase after the JSON read.
+            Progress?.Report((TotalStoryCount, TotalStoryCount, "Updating sidebar list..."));
+            await System.Windows.Threading.Dispatcher.Yield(System.Windows.Threading.DispatcherPriority.Background);
+            Stories.AddRange(Loaded);
 #else
             if (Directory.Exists(BaseFolder))
             {
@@ -910,19 +1065,59 @@ window.scrollTo({{ top: scrollDiv, behavior: 'smooth'}});";
                 }
             }
 
-            string UserDataFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), nameof(StoryManager), "BrowserCache");
-            CoreWebView2Environment Env = await CoreWebView2Environment.CreateAsync(null, UserDataFolder);
-            await WebView.EnsureCoreWebView2Async(Env);
+            //  WebView2 init is one-time per process: only the first launch creates the CoreWebView2Environment.
+            //  Calling CoreWebView2Environment.CreateAsync a second time with the same UserDataFolder while the first
+            //  environment is still alive hangs (WebView2 only allows a single environment per UserDataFolder per
+            //  process). On a directory-switch reload the WebView is already initialized, so we skip this phase.
+            if (WebView.CoreWebView2 == null)
+            {
+                Progress?.Report((TotalStoryCount, TotalStoryCount, "Initializing browser..."));
+                string UserDataFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), nameof(StoryManager), "BrowserCache");
+                CoreWebView2Environment Env = await CoreWebView2Environment.CreateAsync(null, UserDataFolder);
+                await WebView.EnsureCoreWebView2Async(Env);
+            }
 
             //  Try to auto-select the last-opened story
             if (Settings.PreviousSessionSettings.RecentSelectedStory == null || !IndexedStories.TryGetValue(Settings.PreviousSessionSettings.RecentSelectedStory, out LiteroticaStory ToLoad))
                 ToLoad = Stories.FirstOrDefault();
+            if (ToLoad != null)
+                Progress?.Report((TotalStoryCount, TotalStoryCount, $"Loading last-viewed story \"{ToLoad.Title}\"..."));
             await SetSelectedStoryAsync(ToLoad, true, false);
 
+            Progress?.Report((TotalStoryCount, TotalStoryCount, "Applying filters..."));
             UpdateStoryVisibilities();
 
-            if (IsInitializing && !Stories.Any())
-                Downloader.OpenOrActivateWindow();
+            //  Mark loading complete only after Stories is fully populated. SaveAsync uses this to decide whether
+            //  it can safely overwrite per-story / per-author settings, so it must not flip until the bulk add
+            //  is done — otherwise an early window-close would persist an empty list.
+            //  We also leave it false if the base folder was unreachable; otherwise a missing/offline path would
+            //  silently reset the user's saved per-story metadata to empty on next save.
+            if (BaseFolderExists)
+            {
+                IsStoriesLoaded = true;
+                Dialog?.MarkComplete(
+                    FinalStatus: $"Loaded {Stories.Count} stor{(Stories.Count == 1 ? "y" : "ies")} in {sw.Elapsed.TotalSeconds:0.0} seconds.",
+                    FinalHeader: "Done");
+
+                if (IsInitializing && !Stories.Any())
+                    Downloader.OpenOrActivateWindow();
+            }
+            else
+            {
+                Dialog?.MarkComplete(
+                    FinalStatus: $"Stories folder not found:\n{BaseFolder}",
+                    FinalHeader: "Done");
+                if (IsInitializing)
+                {
+                    MessageBox.Show(Window,
+                        $"The configured stories folder could not be found:\n\n{BaseFolder}\n\n" +
+                        "Your previously-saved story ratings, favorites, and other metadata have NOT been loaded and will not be overwritten on close. " +
+                        "Reconnect the drive (or update the stories folder in Settings) and re-launch StoryManager to restore them.",
+                        "Stories folder not found",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Warning);
+                }
+            }
         }
 
 #if NEVER

@@ -189,6 +189,14 @@
 
         <Style TargetType="{x:Type ListBox}" x:Key="StoryListStyle">
             <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Disabled" />
+            <Setter Property="ScrollViewer.CanContentScroll" Value="True" />
+            <!-- UI virtualization. Without IsVirtualizingWhenGrouping, the grouped 'All' / 'Favorites' tabs
+                 instantiate a ListBoxItem for every story (and a GroupBox for every author), which is what
+                 makes the sidebar unresponsive at thousands of stories. -->
+            <Setter Property="VirtualizingPanel.IsVirtualizing" Value="True" />
+            <Setter Property="VirtualizingPanel.VirtualizationMode" Value="Recycling" />
+            <Setter Property="VirtualizingPanel.IsVirtualizingWhenGrouping" Value="True" />
+            <Setter Property="VirtualizingPanel.ScrollUnit" Value="Pixel" />
             <Setter Property="BorderBrush" Value="DarkGray" />
             <Setter Property="AlternationCount" Value="2" />
             <Setter Property="ItemContainerStyle" Value="{StaticResource StoryListItemStyle}" />

@@ -26,7 +26,10 @@ namespace StoryManager.VM
 
     public class Settings : ViewModelBase
     {
-        public SavedSettings PreviousSessionSettings { get; }
+        private SavedSettings _PreviousSessionSettings;
+        /// <summary>The DTO loaded from the stories folder's settings.json. Replaced by <see cref="LoadFromCurrentStoriesDirectory"/>
+        /// when the user switches stories folders so per-story / per-author lookups reflect the active library.</summary>
+        public SavedSettings PreviousSessionSettings => _PreviousSessionSettings;
 
         public MainViewModel MVM { get; }
 
@@ -76,21 +79,22 @@ namespace StoryManager.VM
         internal bool IsUsingDefaultStoriesDirectory => StoriesDirectory == DefaultStoriesDirectory;
 
         private string _StoriesDirectory;
-        public string StoriesDirectory
-        {
-            get => _StoriesDirectory;
-            private set
-            {
-                if (_StoriesDirectory != value)
-                {
-                    _StoriesDirectory = value;
-                    NPC(nameof(StoriesDirectory));
-                    StoriesDirectoryChanged?.Invoke(this, StoriesDirectory);
-                }
-            }
-        }
+        public string StoriesDirectory => _StoriesDirectory;
 
-        public event EventHandler<string> StoriesDirectoryChanged;
+        /// <summary>Switches <see cref="StoriesDirectory"/> to <paramref name="NewPath"/> and reloads settings.json from
+        /// inside it via <see cref="LoadFromCurrentStoriesDirectory"/>. Callers (e.g. <see cref="MainViewModel.ReloadStoriesFolderAsync"/>)
+        /// are responsible for saving any current-folder state before calling this.</summary>
+        internal void SwitchStoriesDirectory(string NewPath)
+        {
+            if (_StoriesDirectory == NewPath)
+                return;
+            _StoriesDirectory = NewPath;
+            NPC(nameof(StoriesDirectory));
+            //  Persist the bootstrap pointer immediately so a crash before close-time save still leaves
+            //  the next launch pointing at the right folder.
+            SavedSettings.WriteBootstrapPointer(_StoriesDirectory);
+            LoadFromCurrentStoriesDirectory(UpdateDocument: true);
+        }
 
         public const int DefaultHistorySize = 25;
 
@@ -467,35 +471,73 @@ namespace StoryManager.VM
         {
             this.MVM = MVM;
 
-            PreviousSessionSettings = SavedSettings.Load(out _);
-
-            DisplaySettings = new(PreviousSessionSettings);
-
+            //  Resolve the stories folder FIRST. settings.json now lives inside that folder, so the location of
+            //  settings.json is no longer fixed — it follows wherever the stories live. ResolveStoriesFolder reads
+            //  the bootstrap pointer (stories-folder.txt) or migrates from the legacy %MyDocuments% location on first
+            //  run after upgrade. The returned path may not exist on disk (e.g., bootstrap pointer references an offline
+            //  drive); MainViewModel.LoadStoriesAsync will surface the existing "Stories folder not found" warning in
+            //  that case and skip persisting changes.
             DefaultStoriesDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), nameof(StoryManager), "Stories", "Literotica");
-            StoriesDirectory = PreviousSessionSettings.StoriesBaseFolder ?? DefaultStoriesDirectory;
+            _StoriesDirectory = SavedSettings.ResolveStoriesFolder(DefaultStoriesDirectory);
 
-            AuthorSettingsByName = PreviousSessionSettings.AuthorSettings.ToDictionary(x => x.Author);
-            StorySettingsByAuthorAndTitle = PreviousSessionSettings.StorySettings.DistinctBy(x => MainViewModel.GetStoryUniqueKey(x.Author, x.Title)).ToDictionary(x => MainViewModel.GetStoryUniqueKey(x.Author, x.Title));
+            //  DisplaySettings + the per-story / per-author lookup dicts are stable references for the lifetime of
+            //  this Settings instance; LoadFromCurrentStoriesDirectory mutates their contents in place rather than
+            //  replacing them so existing data bindings (and the FilterSettings.FiltersChanged subscriber wired in
+            //  MainViewModel's ctor) don't break.
+            DisplaySettings = new();
+            AuthorSettingsByName = new();
+            StorySettingsByAuthorAndTitle = new();
 
-            HistorySize = PreviousSessionSettings.HistorySize ?? DefaultHistorySize;
+            //  UpdateDocument is false on initial load: the WebView2 hasn't been initialized yet, so async refresh
+            //  calls would no-op or fail. The MVM completes WebView2 setup later in LoadStoriesAsync.
+            LoadFromCurrentStoriesDirectory(UpdateDocument: false);
+        }
 
-            GroupAllByAuthor = PreviousSessionSettings.GroupAllByAuthor;
-            GroupFavoritesByAuthor = PreviousSessionSettings.GroupFavoritesByAuthor;
+        /// <summary>Reads <c>settings.json</c> from <see cref="StoriesDirectory"/> and applies all of its contents into this
+        /// <see cref="Settings"/> instance: the per-story / per-author lookup dicts, display flags, sort/group/history prefs,
+        /// theme, font, colors, and keywords.</summary>
+        /// <param name="UpdateDocument">Whether the appearance refresh calls (font, colors) should re-execute scripts in the
+        /// WebView2. False during initial program load (the WebView2 isn't ready yet); true on a later directory-change reload.</param>
+        private void LoadFromCurrentStoriesDirectory(bool UpdateDocument)
+        {
+            _PreviousSessionSettings = SavedSettings.Load(_StoriesDirectory, out _);
 
-            SortingMode = PreviousSessionSettings.SortingMode;
+            //  Per-story / per-author maps that RegisterStory consults when a newly-loaded LiteroticaStory is first added.
+            //  Clear-and-repopulate (rather than replacing the dictionary instance) so anything holding a reference still sees
+            //  the current data.
+            AuthorSettingsByName.Clear();
+            foreach (AuthorSettings A in _PreviousSessionSettings.AuthorSettings)
+            {
+                if (!string.IsNullOrEmpty(A.Author) && !AuthorSettingsByName.ContainsKey(A.Author))
+                    AuthorSettingsByName[A.Author] = A;
+            }
+            StorySettingsByAuthorAndTitle.Clear();
+            foreach (StorySettings S in _PreviousSessionSettings.StorySettings.DistinctBy(x => MainViewModel.GetStoryUniqueKey(x.Author, x.Title)))
+                StorySettingsByAuthorAndTitle[MainViewModel.GetStoryUniqueKey(S.Author, S.Title)] = S;
 
-            WarnIfClosingUnsavedStory = PreviousSessionSettings.WarnIfClosingUnsavedStory;
+            //  Display flags (DisplaySettings is a stable reference; mutate fields in place).
+            DisplaySettings.ShowCategory = _PreviousSessionSettings.ShowCategory;
+            DisplaySettings.ShowDateApproved = _PreviousSessionSettings.ShowDateApproved;
+            DisplaySettings.ShowReadState = _PreviousSessionSettings.ShowReadState;
+            DisplaySettings.ShowOverallRating = _PreviousSessionSettings.ShowOverallRating;
+            DisplaySettings.ShowPageCount = _PreviousSessionSettings.ShowPageCount;
+            DisplaySettings.ShowWordCount = _PreviousSessionSettings.ShowWordCount;
+            DisplaySettings.ShowUserRating = _PreviousSessionSettings.ShowUserRating;
+            DisplaySettings.ShowDateDownloaded = _PreviousSessionSettings.ShowDateDownloaded;
 
-            _ = SetThemeAsync(PreviousSessionSettings.Theme, true, false);
+            HistorySize = _PreviousSessionSettings.HistorySize ?? DefaultHistorySize;
+            GroupAllByAuthor = _PreviousSessionSettings.GroupAllByAuthor;
+            GroupFavoritesByAuthor = _PreviousSessionSettings.GroupFavoritesByAuthor;
+            SortingMode = _PreviousSessionSettings.SortingMode;
+            WarnIfClosingUnsavedStory = _PreviousSessionSettings.WarnIfClosingUnsavedStory;
 
-            _ = SetCommaDelimitedKeywordsAsync(PreviousSessionSettings.Keywords, false);
-
-            _ = SetFontSizeAsync(PreviousSessionSettings.GetFontSize(DefaultFontSize), false);
-            _ = SetFontFamilyAsync(PreviousSessionSettings.GetFontFamily(DefaultFontFamily), false);
-
-            _ = SetForegroundColorAsync(PreviousSessionSettings.GetForegroundColor(DefaultColorPalettes[Theme].ForegroundColor), false);
-            _ = SetBackgroundColorAsync(PreviousSessionSettings.GetBackgroundColor(DefaultColorPalettes[Theme].BackgroundColor), false);
-            _ = SetHighlightColorAsync(PreviousSessionSettings.GetHighlightColor(DefaultColorPalettes[Theme].HighlightColor), false);
+            _ = SetThemeAsync(_PreviousSessionSettings.Theme, true, UpdateDocument);
+            _ = SetCommaDelimitedKeywordsAsync(_PreviousSessionSettings.Keywords, UpdateDocument);
+            _ = SetFontSizeAsync(_PreviousSessionSettings.GetFontSize(DefaultFontSize), UpdateDocument);
+            _ = SetFontFamilyAsync(_PreviousSessionSettings.GetFontFamily(DefaultFontFamily), UpdateDocument);
+            _ = SetForegroundColorAsync(_PreviousSessionSettings.GetForegroundColor(DefaultColorPalettes[Theme].ForegroundColor), UpdateDocument);
+            _ = SetBackgroundColorAsync(_PreviousSessionSettings.GetBackgroundColor(DefaultColorPalettes[Theme].BackgroundColor), UpdateDocument);
+            _ = SetHighlightColorAsync(_PreviousSessionSettings.GetHighlightColor(DefaultColorPalettes[Theme].HighlightColor), UpdateDocument);
         }
 
         private Dictionary<string, AuthorSettings> AuthorSettingsByName { get; }
@@ -519,10 +561,41 @@ namespace StoryManager.VM
                 return DefaultValue;
         }
 
-        public async Task SaveAsync(bool TryCreateBackup)
+        public Task SaveAsync(bool TryCreateBackup) => SaveAsync(TryCreateBackup, null);
+
+        public async Task SaveAsync(bool TryCreateBackup, IProgress<(int current, int total, string status)> Progress)
         {
             if (MVM.SelectedStory != null)
                 MVM.SelectedStory.RecentPosition = await Bookmark.CreateAsync(MVM.WebView);
+
+            //  Materialize the per-story / per-author DTO lists with explicit iteration so we can report progress.
+            //  When the load didn't complete this session, fall back to the previous session's values verbatim
+            //  (see F1 in the PR notes — protects against close-while-loading clobbering user metadata).
+            int StoryTotal = MVM.IsStoriesLoaded ? MVM.Stories.Count : (PreviousSessionSettings.StorySettings?.Count ?? 0);
+            Progress?.Report((0, StoryTotal, StoryTotal == 0 ? "Saving settings..." : $"Saving 0 of {StoryTotal} stories..."));
+
+            List<StorySettings> StorySettingsList;
+            List<AuthorSettings> AuthorSettingsList;
+            if (MVM.IsStoriesLoaded)
+            {
+                StorySettingsList = new List<StorySettings>(StoryTotal);
+                int Done = 0;
+                foreach (LiteroticaStory Story in MVM.Stories)
+                {
+                    StorySettingsList.Add(new StorySettings(Story));
+                    Done++;
+                    //  Throttle the report rate — for thousands of stories, reporting every iteration floods the dispatcher.
+                    if (Progress != null && (Done % 50 == 0 || Done == StoryTotal))
+                        Progress.Report((Done, StoryTotal, $"Saving {Done} of {StoryTotal} stories..."));
+                }
+                AuthorSettingsList = MVM.AuthorGroups.Values.Select(x => new AuthorSettings(x)).ToList();
+            }
+            else
+            {
+                StorySettingsList = PreviousSessionSettings.StorySettings;
+                AuthorSettingsList = PreviousSessionSettings.AuthorSettings;
+                Progress?.Report((StoryTotal, StoryTotal, $"{StoryTotal} stor{(StoryTotal == 1 ? "y" : "ies")} preserved (load did not complete this session)."));
+            }
 
             ColorConverter ColorConverter = new();
 
@@ -546,12 +619,18 @@ namespace StoryManager.VM
                 BackgroundColor = IsUsingDefaultBackgroundColor ? null : ColorConverter.ConvertToString(BackgroundColor),
                 HighlightColor = IsUsingDefaultHighlightColor ? null : ColorConverter.ConvertToString(HighlightColor),
 
-                StoriesBaseFolder = IsUsingDefaultStoriesDirectory ? null : StoriesDirectory,
+                //  StoriesBaseFolder is no longer written to settings.json (the bootstrap pointer + the file's own
+                //  location are authoritative). ShouldSerializeStoriesBaseFolder returns false so the field is dropped
+                //  from the output regardless of what we assign here.
 
-                RecentSelectedStory = MVM.SelectedStory == null ? null : MainViewModel.GetStoryUniqueKey(MVM.SelectedStory.AuthorName, MVM.SelectedStory.Title),
+                RecentSelectedStory = !MVM.IsStoriesLoaded
+                    ? PreviousSessionSettings.RecentSelectedStory
+                    : (MVM.SelectedStory == null ? null : MainViewModel.GetStoryUniqueKey(MVM.SelectedStory.AuthorName, MVM.SelectedStory.Title)),
 
                 HistorySize = HistorySize,
-                HistoryList = MVM.RecentStories.Select(x => MainViewModel.GetStoryUniqueKey(x.AuthorName, x.Title)).ToList(),
+                HistoryList = MVM.IsStoriesLoaded
+                    ? MVM.RecentStories.Select(x => MainViewModel.GetStoryUniqueKey(x.AuthorName, x.Title)).ToList()
+                    : PreviousSessionSettings.HistoryList,
 
                 GroupAllByAuthor = GroupAllByAuthor,
                 GroupFavoritesByAuthor = GroupFavoritesByAuthor,
@@ -560,9 +639,9 @@ namespace StoryManager.VM
 
                 Keywords = CommaDelimitedKeywords,
 
-                AuthorSettings = MVM.AuthorGroups.Values.Select(x => new AuthorSettings(x)).ToList(),
-                StorySettings = MVM.Stories.Select(x => new StorySettings(x)).ToList(),
-                StoryMetadata = MVM.Stories.Select(x => x.Summary).ToList(),
+                //  Lists were built above with progress reporting; assign them here.
+                AuthorSettings = AuthorSettingsList,
+                StorySettings = StorySettingsList,
 
                 ShowCategory = DisplaySettings.ShowCategory,
                 ShowDateApproved = DisplaySettings.ShowDateApproved,
@@ -577,21 +656,21 @@ namespace StoryManager.VM
 
                 WarnIfClosingUnsavedStory = WarnIfClosingUnsavedStory
             };
-            Settings.Save();
+            Progress?.Report((StoryTotal, StoryTotal, "Writing settings.json..."));
+            await Settings.SaveAsync(SavedSettings.GetSettingsPath(StoriesDirectory));
 
             if (TryCreateBackup)
             {
-                string Folder = SavedSettings.GetDefaultSettingsDirectory();
-
-                const int MaxBackups = 5;
-                static string GetBackupFilename(int BackupNumber) => $"settings-bak{BackupNumber}{SavedSettings.FileExt}";
+                //  Backups now live alongside settings.json in the stories folder, so a copy of the stories folder
+                //  carries its full revision history with it.
+                string Folder = StoriesDirectory;
 
                 //  Find the oldest backup to overwrite
                 DateTime OldestBackupWriteTime = DateTime.Now;
                 string OldestBackupFilePath = null;
-                for (int i = 1; i <= MaxBackups; i++)
+                for (int i = 1; i <= SavedSettings.MaxBackups; i++)
                 {
-                    string BackupFilePath = Path.Combine(Folder, GetBackupFilename(i));
+                    string BackupFilePath = SavedSettings.GetBackupPath(Folder, i);
                     if (!File.Exists(BackupFilePath))
                     {
                         OldestBackupFilePath = BackupFilePath;
@@ -610,9 +689,9 @@ namespace StoryManager.VM
 
                 //  Determine how recent the newest backup is
                 DateTime? NewestBackupWriteTime = null;
-                for (int i = 1; i <= MaxBackups; i++)
+                for (int i = 1; i <= SavedSettings.MaxBackups; i++)
                 {
-                    string BackupFilePath = Path.Combine(Folder, GetBackupFilename(i));
+                    string BackupFilePath = SavedSettings.GetBackupPath(Folder, i);
                     if (File.Exists(BackupFilePath))
                     {
                         DateTime WriteTime = File.GetLastWriteTime(BackupFilePath);
@@ -625,8 +704,8 @@ namespace StoryManager.VM
                 TimeSpan RecencyThreshold = TimeSpan.FromHours(1.0);
                 if (!File.Exists(OldestBackupFilePath) || !NewestBackupWriteTime.HasValue || DateTime.Now.Subtract(NewestBackupWriteTime.Value) >= RecencyThreshold)
                 {
-                    Settings.StoryMetadata = new(); // The metadata is only used to load the stories more quickly. It is also stored in separate files per story so it's not needed for the settings backups.
-                    Settings.Save(OldestBackupFilePath);
+                    Progress?.Report((StoryTotal, StoryTotal, "Writing backup..."));
+                    await Settings.SaveAsync(OldestBackupFilePath);
                 }
             }
         }
@@ -638,15 +717,19 @@ namespace StoryManager.VM
                 CommonOpenFileDialog FolderBrowser = new CommonOpenFileDialog();
                 FolderBrowser.InitialDirectory = StoriesDirectory;
                 FolderBrowser.IsFolderPicker = true;
-                if (FolderBrowser.ShowDialog() == CommonFileDialogResult.Ok)
+                if (FolderBrowser.ShowDialog() == CommonFileDialogResult.Ok && FolderBrowser.FileName != StoriesDirectory)
                 {
-                    StoriesDirectory = FolderBrowser.FileName;
+                    //  Hand off to MVM so the reload sequence (save-to-old-folder, switch settings, reset MVM state,
+                    //  load-from-new-folder) runs as a single coordinated transition with full isolation between libraries.
+                    _ = MVM.ReloadStoriesFolderAsync(FolderBrowser.FileName);
                 }
             }
             catch (Exception ex) { MessageBox.Show(ex.ToString()); }
         });
 
-        public DelegateCommand<object> OpenSettingsFolder => new(_ => { GeneralUtils.ShellExecute(SavedSettings.GetDefaultSettingsDirectory()); });
+        //  Settings (and rotating backups) now live in the stories folder itself, so opening the "settings folder"
+        //  is the same as opening the stories folder.
+        public DelegateCommand<object> OpenSettingsFolder => new(_ => { GeneralUtils.ShellExecute(StoriesDirectory); });
     }
 
     public readonly record struct ColorPalette(string Name, Color ForegroundColor, Color BackgroundColor, Color HighlightColor);

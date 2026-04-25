@@ -54,8 +54,14 @@ namespace StoryManager
         [DataMember(Name = "HighlightColor")]
         public string HighlightColor { get; set; }
 
+        //  StoriesBaseFolder used to live in settings.json so the program could find the stories folder. As of 1.0.11.0
+        //  the relationship is inverted: the bootstrap pointer (stories-folder.txt) names the stories folder, and
+        //  settings.json lives inside it. We still deserialize this field once during migration so the legacy file's
+        //  StoriesBaseFolder can seed the new stories folder, but ShouldSerializeStoriesBaseFolder returns false so
+        //  the value is dropped from settings.json the next time we save.
         [DataMember(Name = "StoriesBaseFolder")]
         public string StoriesBaseFolder { get; set; }
+        public bool ShouldSerializeStoriesBaseFolder() => false;
 
         [DataMember(Name = "RecentSelectedStory")]
         public string RecentSelectedStory { get; set; }
@@ -80,7 +86,12 @@ namespace StoryManager
         public List<AuthorSettings> AuthorSettings { get; set; }
         [DataMember(Name = "StorySettings")]
         public List<StorySettings> StorySettings { get; set; }
-        [DataMember(Name = "StoryMetadata")]
+        //  StoryMetadata used to be cached here as a load-time optimization, but for users with thousands of
+        //  stories this caused the settings file to balloon to hundreds of MB and crash the program on startup.
+        //  Per-story metadata is already persisted in each story folder's story-metadata.json file, so we no
+        //  longer write this field. It is kept (and ignored on serialize) for backward-compatible reads of
+        //  older settings files; the field is dropped the next time settings are saved.
+        [JsonIgnore]
         public List<SerializableStory> StoryMetadata { get; set; }
 
         [DataMember(Name = "ShowCategory")]
@@ -178,20 +189,100 @@ namespace StoryManager
         internal const string FileExt = ".json";
 #endif
 
-#if LEGACY_SETTINGS_PATH
-        internal static readonly string AssemblyPath = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
-        internal static readonly string DefaultSettingsFilename = $"{nameof(StoryManager)} Settings{FileExt}";
-        internal static string GetDefaultSettingsDirectory() => AssemblyPath;
-        internal static string GetDefaultSettingsPath() => Path.Combine(AssemblyPath, DefaultSettingsFilename);
-#else
-        internal static readonly string DefaultSettingsFilename = $"settings{FileExt}";
-        internal static string GetDefaultSettingsDirectory() => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), nameof(StoryManager));
-        internal static string GetDefaultSettingsPath() => Path.Combine(GetDefaultSettingsDirectory(), DefaultSettingsFilename);
-#endif
+        internal const int MaxBackups = 5;
 
-        /// <summary>Saves this settings instance to the default file path. See also: <see cref="Save(string)"/></summary>
-        /// <returns>True if successful</returns>
-        internal bool Save() => Save(GetDefaultSettingsPath());
+        /// <summary>The directory holding the bootstrap pointer. Also the directory legacy versions (&lt;= 1.0.10.0) used for settings.json itself.</summary>
+        internal static string BootstrapDirectory => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), nameof(StoryManager));
+
+        /// <summary>One-line text file holding the absolute path of the user's stories folder. Lives in <see cref="BootstrapDirectory"/>.
+        /// Settings live alongside the stories themselves, so this pointer is what tells the program where to look.</summary>
+        internal const string BootstrapPointerFilename = "stories-folder.txt";
+        internal static string GetBootstrapPointerPath() => Path.Combine(BootstrapDirectory, BootstrapPointerFilename);
+
+        internal static string GetSettingsFilename() => $"settings{FileExt}";
+        internal static string GetBackupFilename(int Number) => $"settings-bak{Number}{FileExt}";
+        internal static string GetSettingsPath(string SettingsDirectory) => Path.Combine(SettingsDirectory, GetSettingsFilename());
+        internal static string GetBackupPath(string SettingsDirectory, int Number) => Path.Combine(SettingsDirectory, GetBackupFilename(Number));
+
+        /// <summary>Resolves which folder holds <c>settings.json</c>. Reads the bootstrap pointer if present; otherwise migrates from
+        /// the legacy %MyDocuments%\StoryManager location (copying settings.json and rotating backups into the resolved stories folder)
+        /// and writes the bootstrap pointer for future launches.</summary>
+        /// <param name="DefaultStoriesFolder">Folder to use if neither a bootstrap pointer nor a legacy settings.json supplies one.</param>
+        internal static string ResolveStoriesFolder(string DefaultStoriesFolder)
+        {
+            //  1. An existing bootstrap pointer wins, even if the path it points at no longer exists. Returning a missing
+            //     path is intentional: it lets MainViewModel surface its "Stories folder not found" warning to the user
+            //     (rather than silently switching to a different folder and overwriting whatever's there).
+            string PointerPath = GetBootstrapPointerPath();
+            if (File.Exists(PointerPath))
+            {
+                try
+                {
+                    string Pointed = File.ReadAllText(PointerPath).Trim();
+                    if (!string.IsNullOrEmpty(Pointed))
+                        return Pointed;
+                }
+                catch (Exception ex) { Debug.WriteLine($"Failed reading bootstrap pointer at '{PointerPath}':\n{ex}"); }
+            }
+
+            //  2. One-time migration. Read the legacy settings.json (if any) just enough to extract StoriesBaseFolder; that
+            //     becomes the new stories folder. Then copy the legacy settings.json + backups into it.
+            string LegacySettingsPath = Path.Combine(BootstrapDirectory, GetSettingsFilename());
+            string ResolvedFolder = DefaultStoriesFolder;
+            if (File.Exists(LegacySettingsPath))
+            {
+                try
+                {
+                    SavedSettings Legacy = GeneralUtils.DeserializeJson<SavedSettings>(File.ReadAllText(LegacySettingsPath));
+                    if (!string.IsNullOrEmpty(Legacy?.StoriesBaseFolder))
+                        ResolvedFolder = Legacy.StoriesBaseFolder;
+                }
+                catch (Exception ex) { Debug.WriteLine($"Failed reading legacy settings to determine stories folder:\n{ex}"); }
+
+                try
+                {
+                    Directory.CreateDirectory(ResolvedFolder);
+                    //  Copy (don't move) so the legacy files remain intact for manual rollback if anything looks wrong.
+                    //  CopyIfMissing also avoids clobbering anything the user might already have placed in the new folder.
+                    CopyIfMissing(LegacySettingsPath, GetSettingsPath(ResolvedFolder));
+                    for (int i = 1; i <= MaxBackups; i++)
+                    {
+                        string LegacyBackup = Path.Combine(BootstrapDirectory, GetBackupFilename(i));
+                        if (File.Exists(LegacyBackup))
+                            CopyIfMissing(LegacyBackup, GetBackupPath(ResolvedFolder, i));
+                    }
+                }
+                catch (Exception ex) { Debug.WriteLine($"Failed migrating legacy settings into stories folder:\n{ex}"); }
+            }
+
+            //  3. Persist the bootstrap pointer so future launches skip both branches above.
+            WriteBootstrapPointer(ResolvedFolder);
+
+            return ResolvedFolder;
+        }
+
+        private static void CopyIfMissing(string Source, string Destination)
+        {
+            if (!File.Exists(Source) || File.Exists(Destination))
+                return;
+            string DestDir = Path.GetDirectoryName(Destination);
+            if (!string.IsNullOrEmpty(DestDir))
+                Directory.CreateDirectory(DestDir);
+            File.Copy(Source, Destination);
+        }
+
+        /// <summary>Persists <paramref name="StoriesFolder"/> to the bootstrap pointer file so future launches read settings.json
+        /// from inside it.</summary>
+        internal static void WriteBootstrapPointer(string StoriesFolder)
+        {
+            try
+            {
+                Directory.CreateDirectory(BootstrapDirectory);
+                File.WriteAllText(GetBootstrapPointerPath(), StoriesFolder);
+            }
+            catch (Exception ex) { Debug.WriteLine($"Failed writing bootstrap pointer:\n{ex}"); }
+        }
+
         internal bool Save(string FilePath)
         {
 #if XML_Settings
@@ -200,25 +291,39 @@ namespace StoryManager
                 Debug.WriteLine(Error.ToString());
             return Success;
 #else
+            //  Atomic write: serialize and write to a sibling .tmp file, then atomically replace the destination.
+            //  Without this, a process kill mid-WriteAllText leaves settings.json truncated and unrecoverable.
+            string TempPath = FilePath + ".tmp";
             try
             {
+                string Dir = Path.GetDirectoryName(FilePath);
+                if (!string.IsNullOrEmpty(Dir))
+                    Directory.CreateDirectory(Dir);
                 string Json = GeneralUtils.SerializeJson(this, true);
-                File.WriteAllText(FilePath, Json);
+                File.WriteAllText(TempPath, Json);
+                File.Move(TempPath, FilePath, overwrite: true);
                 return true;
             }
             catch (Exception ex)
             {
                 Debug.WriteLine(ex.ToString());
+                try { if (File.Exists(TempPath)) File.Delete(TempPath); }
+                catch { }
                 return false;
             }
 #endif
         }
 
-        /// <param name="Exists">True if the default settings file was found, false if a new empty settings object is returned</param>
-        internal static SavedSettings Load(out bool Exists)
+        /// <summary>Async equivalent of <see cref="Save(string)"/> that performs JSON serialization and disk I/O off the UI thread.</summary>
+        internal Task<bool> SaveAsync(string FilePath) => Task.Run(() => Save(FilePath));
+
+        /// <summary>Loads settings.json from <paramref name="SettingsDirectory"/>. If the file is unreadable it is renamed to
+        /// <c>settings-corrupt-{timestamp}.json</c> in the same folder and a defaults instance is returned.</summary>
+        /// <param name="Exists">True if a settings file was found and parsed; false otherwise.</param>
+        internal static SavedSettings Load(string SettingsDirectory, out bool Exists)
         {
 #if XML_Settings
-            Settings Settings = XMLSerializer.Deserialize<Settings>(GetDefaultSettingsPath());
+            Settings Settings = XMLSerializer.Deserialize<Settings>(GetSettingsPath(SettingsDirectory));
             if (Settings == null)
             {
                 Settings = new Settings();
@@ -228,15 +333,34 @@ namespace StoryManager
                 Exists = true;
             return Settings;
 #else
-            string Path = GetDefaultSettingsPath();
-            Exists = File.Exists(Path);
-            if (Exists)
-            {
-                SavedSettings Settings = GeneralUtils.DeserializeJson<SavedSettings>(File.ReadAllText(Path));
-                return Settings;
-            }
-            else
+            string SettingsPath = GetSettingsPath(SettingsDirectory);
+            Exists = File.Exists(SettingsPath);
+            if (!Exists)
                 return new SavedSettings();
+
+            try
+            {
+                return GeneralUtils.DeserializeJson<SavedSettings>(File.ReadAllText(SettingsPath));
+            }
+            catch (Exception ex)
+            {
+                //  The settings file exists but couldn't be parsed (manually edited, partial write from a prior crash,
+                //  schema mismatch, etc.). Quarantine it instead of silently overwriting on the next save.
+                Debug.WriteLine($"Failed to load settings from '{SettingsPath}':\n{ex}");
+                try
+                {
+                    Directory.CreateDirectory(SettingsDirectory);
+                    string Quarantined = Path.Combine(
+                        SettingsDirectory,
+                        $"settings-corrupt-{DateTime.Now:yyyyMMdd-HHmmss}{FileExt}");
+                    File.Move(SettingsPath, Quarantined, overwrite: false);
+                    Debug.WriteLine($"Renamed unreadable settings file to '{Quarantined}'");
+                }
+                catch (Exception renameEx) { Debug.WriteLine($"Failed to quarantine corrupt settings file: {renameEx}"); }
+
+                Exists = false;
+                return new SavedSettings();
+            }
 #endif
         }
 
