@@ -37,6 +37,17 @@ Windows desktop program for downloading, organizing, and viewing your favorite s
 
   Each stories folder has its own `settings.json` (favorites/ratings/notes/history/theme/etc.), so different folders are completely independent libraries. Switching folders from the Settings dialog saves the current library, swaps in the new folder's settings, and reloads — all in-process, no restart required. A startup progress dialog shows the per-story load progress and a completion notification; the same dialog appears when you switch libraries.
 
+- Top Rated and Top Reads tabs
+
+  Two ranked sidebar tabs in addition to *All / Favorites / Recent / Read-later*:
+
+  - **Top Rated** — stories ordered by rating, highest first. A toggle inside the tab flips between *Site average* (Literotica's per-chapter rating, default) and *My rating* (the stars you set yourself). Unrated stories are hidden. A **Number Read Filter** dropdown sets a minimum total view count (`0`, `1,000`, `10,000`, `50,000`, `100,000`, `200,000`, `500,000`, `1,000,000`, `2,500,000`, `5,000,000`, `7,500,000`, `10,000,000`, `12,500,000`, `15,000,000`) so the rating ranking isn't dominated by stories with one or two reads that happened to land on five stars.
+  - **Top Reads** — stories ordered by total Literotica view count summed across chapters, highest first.
+
+  Both tabs paginate at 100 stories per page with `◀` / `▶` buttons and a "Page X of Y" counter. Both honor the existing filter dropdown and the search box, so e.g. *Hide read* still applies inside the ranked tabs.
+
+  The selected story's bottom-left details panel now shows the total Literotica view count (e.g. `(4.56)  12,345 reads  Story Title`) next to the existing rating and title.
+
 - Built-in search
 
   Search for stories from directly within *StoryManager* by expanding the search settings at the bottom of the window.

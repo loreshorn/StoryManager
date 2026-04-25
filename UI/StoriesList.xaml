@@ -213,6 +213,17 @@
             </Style.Triggers>
         </Style>
 
+        <!-- Used for plain-text labels in tabs that don't otherwise re-pick up the Window's
+             TextElement.Foreground="White" trigger in dark mode (e.g. the Page X of Y page-counter). -->
+        <Style TargetType="{x:Type TextBlock}" x:Key="ThemedLabelStyle">
+            <Setter Property="Foreground" Value="Black" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding RelativeSource={RelativeSource Mode=FindAncestor, AncestorType={x:Type local:StoriesList}}, Path=DataContext.Settings.IsDarkMode, Mode=OneWay, FallbackValue=False}" Value="True">
+                    <Setter Property="Foreground" Value="White" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
         <Style TargetType="{x:Type TextBlock}" x:Key="AuthorNameStyle">
             <Setter Property="TextWrapping" Value="Wrap" />
             <Setter Property="FontWeight" Value="SemiBold" />
@@ -401,9 +412,24 @@
                         <Button DockPanel.Dock="Right" Content="▶" Padding="6,2" Margin="4,0,0,0"
                                 Command="{Binding RankedByRatingNext}" IsEnabled="{Binding RankedByRatingCanNext}" />
                         <TextBlock HorizontalAlignment="Center" VerticalAlignment="Center"
+                                   Style="{StaticResource ThemedLabelStyle}"
                                    Text="{Binding RankedByRatingPageLabel, FallbackValue='Page 1 of 1'}" />
                     </DockPanel>
                     <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,0,0,4">
+                        <StackPanel.Resources>
+                            <!-- Same dark-mode caveat as the Number Read Filter GroupBox above: the default
+                                 RadioButton template renders its Content via a ContentPresenter that doesn't
+                                 always re-pick up TextElement.Foreground="White" set on the Window in dark mode,
+                                 so we set Foreground explicitly here. Scoped to this StackPanel only. -->
+                            <Style TargetType="{x:Type RadioButton}">
+                                <Setter Property="Foreground" Value="Black" />
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding RelativeSource={RelativeSource Mode=FindAncestor, AncestorType={x:Type local:StoriesList}}, Path=DataContext.Settings.IsDarkMode, Mode=OneWay, FallbackValue=False}" Value="True">
+                                        <Setter Property="Foreground" Value="White" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </StackPanel.Resources>
                         <RadioButton Content="My rating"    GroupName="RatingSource" Margin="0,0,8,0"
                                      IsChecked="{Binding RankRatingByUserRating, Mode=TwoWay}" />
                         <RadioButton Content="Site average" GroupName="RatingSource"
@@ -411,6 +437,22 @@
                     </StackPanel>
                     <GroupBox DockPanel.Dock="Top" Header="Number Read Filter:" Margin="3,0,3,4" Padding="4,2"
                               ToolTip="Hide stories with fewer Literotica views than this threshold">
+                        <GroupBox.Style>
+                            <Style TargetType="{x:Type GroupBox}">
+                                <!-- Light mode: black header on light background. Dark mode: white header on dark background.
+                                     The default GroupBox template doesn't re-inherit TextElement.Foreground from the Window
+                                     once the system Aero theme's Border/ContentPresenter chain takes over, so we set
+                                     Foreground explicitly here. -->
+                                <Setter Property="Foreground" Value="Black" />
+                                <Setter Property="BorderBrush" Value="#888" />
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding RelativeSource={RelativeSource Mode=FindAncestor, AncestorType={x:Type local:StoriesList}}, Path=DataContext.Settings.IsDarkMode, Mode=OneWay, FallbackValue=False}" Value="True">
+                                        <Setter Property="Foreground" Value="White" />
+                                        <Setter Property="BorderBrush" Value="#AAA" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </GroupBox.Style>
                         <ComboBox HorizontalAlignment="Stretch"
                                   ItemsSource="{Binding MinReadsForRatingOptions}"
                                   SelectedItem="{Binding MinReadsForRating, Mode=TwoWay}">
@@ -435,6 +477,7 @@
                         <Button DockPanel.Dock="Right" Content="▶" Padding="6,2" Margin="4,0,0,0"
                                 Command="{Binding RankedByReadsNext}" IsEnabled="{Binding RankedByReadsCanNext}" />
                         <TextBlock HorizontalAlignment="Center" VerticalAlignment="Center"
+                                   Style="{StaticResource ThemedLabelStyle}"
                                    Text="{Binding RankedByReadsPageLabel, FallbackValue='Page 1 of 1'}" />
                     </DockPanel>
                     <ListBox Style="{StaticResource StoryListStyle}" IsSynchronizedWithCurrentItem="False"
