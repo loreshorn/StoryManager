@@ -409,10 +409,9 @@
                         <RadioButton Content="Site average" GroupName="RatingSource"
                                      IsChecked="{Binding RankRatingBySiteAverage, Mode=TwoWay}" />
                     </StackPanel>
-                    <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" HorizontalAlignment="Center" Margin="3,0,3,4">
-                        <TextBlock VerticalAlignment="Center" Margin="0,0,6,0"
-                                   Text="Number Read Filter:" ToolTip="Hide stories with fewer Literotica views than this threshold" />
-                        <ComboBox MinWidth="100" VerticalAlignment="Center"
+                    <GroupBox DockPanel.Dock="Top" Header="Number Read Filter:" Margin="3,0,3,4" Padding="4,2"
+                              ToolTip="Hide stories with fewer Literotica views than this threshold">
+                        <ComboBox HorizontalAlignment="Stretch"
                                   ItemsSource="{Binding MinReadsForRatingOptions}"
                                   SelectedItem="{Binding MinReadsForRating, Mode=TwoWay}">
                             <ComboBox.ItemTemplate>
@@ -421,7 +420,7 @@
                                 </DataTemplate>
                             </ComboBox.ItemTemplate>
                         </ComboBox>
-                    </StackPanel>
+                    </GroupBox>
                     <ListBox Style="{StaticResource StoryListStyle}" IsSynchronizedWithCurrentItem="False"
                              ItemsSource="{Binding RankedByRatingPage}"
                              SelectedItem="{Binding BindableSelectedStory, Mode=TwoWay}" d:ItemsSource="{d:SampleData ItemCount=8}" />
